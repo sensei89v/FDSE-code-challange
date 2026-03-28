@@ -1,0 +1,155 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: fdse
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - fdse
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d fdse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf
+      - mqtt_data:/mosquitto/data/
+    networks:
+      - fdse
+    healthcheck:
+      test: ["CMD-SHELL", "mosquitto_sub -h localhost -p 1883 -t '$$SYS/#' -C 1 -W 3"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  producer:
+    build: ./producer
+    volumes:
+      - ./producer:/app
+    depends_on:
+      mqtt:
+        condition: service_healthy
+    command:
+      - python
+      - producer.py
+      - --host
+      - mqtt
+      - --port
+      - "1883"
+      - --loop
+      - --frequency
+      - "500"
+      - --id-count
+      - "5"
+      - --jitter
+      - "10"
+      - --accuracy
+      - "0.9"
+    networks:
+      - fdse
+
+  ingestion:
+    build: ./ingestion
+    volumes:
+      - ./ingestion:/app
+    command:
+      - python
+      - ingestion.py
+      - --host
+      - mqtt
+      - --port
+      - "1883"
+      - --target-url
+      - http://transformation:8081/measures
+    depends_on:
+      mqtt:
+        condition: service_healthy
+      transformation:
+        condition: service_started
+    networks:
+      - fdse
+
+  transformation:
+    build: ./transformation
+    volumes:
+      - ./transformation:/app
+    ports:
+      - "8081:8081"
+    depends_on:
+      - sink
+    command:
+      - python
+      - transformation.py
+      - --target-url
+      - http://sink:8080/measures
+      - --window
+      - "30"
+      - --state-file
+      - /app/state.json
+      - --max-buffer-size
+      - "10000"
+    networks:
+      - fdse
+
+  sink:
+    build: ./sink
+    volumes:
+      - ./sink:/app
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - python
+      - sink.py
+      - --db-url
+      - postgresql://postgres:postgres@postgres:5432/fdse
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    networks:
+      - fdse
+
+  notebooks:
+    build: ./notebooks
+    ports:
+      - "8888:8888"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command:
+      - marimo
+      - run
+      - live_metrics.py
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8888"
+      - --no-token
+      - --
+      - --db-url
+      - postgresql://postgres:postgres@postgres:5432/fdse
+    networks:
+      - fdse
+
+networks:
+  fdse:
+
+volumes:
+  postgres_data:
+  mqtt_data:
+
+
